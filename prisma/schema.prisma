@@ -1,0 +1,367 @@
+// Casino side of the stack. The Go slotopol engine in /engine stays the single
+// source of truth for play balances; everything here is the operator-facing
+// record-keeping around it (money in, money out, the ledger, config).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+/* ------------------------------------------------------------------ players */
+
+model User {
+  id           String    @id @default(auto()) @map("_id") @db.ObjectId
+  email        String    @unique
+  passwordHash String
+  /** uid of the matching account in the slotopol engine. */
+  engineUid    Int?      @unique
+  username     String    @default("")
+  firstName    String    @default("")
+  lastName     String    @default("")
+  phone        String    @default("")
+  country      String    @default("")
+  avatar       String    @default("")
+  status       String    @default("active") // active | blocked
+  banReason    String    @default("")
+  // MongoDB treats null as a value in unique indexes, so uniqueness for these two
+  // is enforced in code (see lib/ids.ts) rather than by the database.
+  refCode      String    @default("")
+  refById      String?   @db.ObjectId
+  refBy        User?     @relation("UserReferral", fields: [refById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  referred     User[]    @relation("UserReferral")
+  totalDeposit  Float     @default(0)
+  totalWithdraw Float     @default(0)
+  totalBet      Float     @default(0)
+  totalWin      Float     @default(0)
+  createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+
+  @@index([username])
+  @@index([refCode])
+
+  spins        Spin[]
+  deposits     Deposit[]
+  withdrawals  Withdrawal[]
+  transactions Transaction[]
+  bonusClaims  BonusClaim[]
+  tickets      SupportTicket[]
+  messages     SupportMessage[]
+  kyc          KycSubmission?
+  buffaloFeatures BuffaloFeature[]
+}
+
+model Spin {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  alias     String   @default("")
+  bet       Float    @default(0)
+  win       Float    @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+/* -------------------------------------------------------------------- games */
+
+/// An operator's override for one game. A *sparse* table on purpose.
+///
+/// The catalogue itself belongs to the game engine, which lists it over HTTP and
+/// is not in this database — so there is nothing to create a row per game at seed
+/// time, and a row exists only once somebody has actually touched that game. The
+/// absence of a row is the default state and means "visible, in service": a new
+/// game pushed to the engine appears in the lobby with no work here, which is the
+/// behaviour an operator expects when they update a provider.
+///
+/// Storing the other way round — a row per known game, defaulting to hidden — would
+/// make every engine update require a matching row, and a forgotten row would
+/// silently hide a game someone had already paid a provider to be running.
+model GameFlag {
+  id       String @id @default(auto()) @map("_id") @db.ObjectId
+  /// The `PROV/NAME` key from the engine's game list, or a local game's own alias.
+  alias    String @unique
+  /// Free text for the operator's own notes. Never shown to a player.
+  note     String @default("")
+  /// false takes it out of the lobby. The game screen refuses to load it too, so
+  /// hiding a game is a real removal rather than a removed menu entry.
+  visible  Boolean @default(true)
+  /// Suspended on its own, without hiding it: it stays in the lobby and says it is
+  /// under maintenance when opened. For taking one broken provider down while the
+  /// rest of the site stays open — which `site.maintenance` cannot do, because it
+  /// takes everything down with it.
+  maint    Boolean @default(false)
+  /// Player-facing wording for `maint`. Falls back to the site-wide notice.
+  maintNote String @default("")
+  sort      Int     @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@index([visible, maint])
+}
+
+/* ----------------------------------------------------------- buffalo slot */
+
+/// A player's in-progress feature round, held server-side so the browser never gets
+/// to say how many free spins it has left.
+///
+/// The free-spins round is a promise the house makes across several spins: each
+/// one is a real bet that pays out without charging, at a multiplier, until the
+/// promised count is spent. If that counter lived in the client, a page refresh or
+/// a forged request could hand itself another fifty. It lives here instead, and the
+/// spin route moves it — decrementing only after a real spin resolves.
+model BuffaloFeature {
+  // MongoDB requires the primary key to be the `_id` field; it is also the one that
+  // keys the feature to a player, so a document exists only while that feature runs.
+  userId     String @id @map("_id") @db.ObjectId
+  user       User   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  kind       String @default("free") // free
+  spinsLeft  Float  @default(0)
+  multiplier Float  @default(1)
+  updatedAt  DateTime @updatedAt
+}
+
+/* ------------------------------------------------------------------ admins */
+
+model Admin {
+  id           String    @id @default(auto()) @map("_id") @db.ObjectId
+  username     String    @unique
+  email        String    @unique
+  passwordHash String
+  name         String    @default("")
+  /** superadmin can manage admins and settings; manager is read-mostly. */
+  role         String    @default("admin") // superadmin | admin | manager
+  status       String    @default("active") // active | blocked
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+/* ---------------------------------------------------------------- settings */
+
+model Setting {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  key       String   @unique
+  value     String   @default("")
+  group     String   @default("general") // general | payment | bonus | misc
+  label     String   @default("")
+  type      String   @default("text") // text | textarea | number | bool | secret
+  updatedAt DateTime @updatedAt
+}
+
+/* ---------------------------------------------------------------- payments */
+
+model Gateway {
+  id       String  @id @default(auto()) @map("_id") @db.ObjectId
+  alias    String  @unique
+  name     String
+  /** manual | stripe | paypal | nowpayments — selects the driver in lib/payments. */
+  driver   String  @default("manual")
+  logo     String  @default("")
+  currency String  @default("USD")
+  /** JSON array of ISO currency codes the gateway accepts. */
+  currencies String @default("[\"USD\"]")
+  crypto   Boolean @default(false)
+  minAmount Float   @default(5)
+  maxAmount Float   @default(100000)
+  /** Percentage + fixed fee taken off the deposit before coins are credited. */
+  percentFee Float  @default(0)
+  fixedFee  Float   @default(0)
+  /** Currency units received per 1 coin. 1 for most, >1 for cheap rails. */
+  rate      Float   @default(1)
+  /** JSON object of driver credentials. Never sent to the browser verbatim. */
+  config    String  @default("{}")
+  /** Manual rails only: shown on the deposit instructions page. */
+  instructions String @default("")
+  /** Manual rails only: JSON array of {label, value, art}. */
+  rails     String  @default("[]")
+  status    Boolean @default(false)
+  sort      Int     @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deposits Deposit[]
+}
+
+model Deposit {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  trx         String    @unique
+  userId      String    @db.ObjectId
+  user        User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  gatewayId   String?   @db.ObjectId
+  gateway     Gateway?  @relation(fields: [gatewayId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  gatewayAlias String   @default("")
+  /** Currency units the player sent. */
+  amount      Float
+  fee         Float     @default(0)
+  /** Currency units actually credited: amount - fee. */
+  net         Float     @default(0)
+  /** Coins credited to the engine wallet: net / rate. */
+  coins       Float     @default(0)
+  currency    String    @default("USD")
+  /** success | pending | cancel */
+  status      String    @default("pending")
+  /** Driver-side payment id (Stripe pi_, PayPal order id, NowPayments id…). */
+  reference   String    @default("")
+  payUrl      String    @default("")
+  /** JSON driver payload — redirect urls, crypto addresses, pay addresses… */
+  data        String    @default("{}")
+  /**
+   * Player's transfer screenshot. Holds the *stored* filename only, relative to
+   * `var/uploads` — never a path the browser supplied, and never a URL: the
+   * image is served by an admin-gated route rather than from `public/`, so a slip
+   * showing someone's bank balance cannot be fetched without a back-office
+   * session. Empty until the player attaches one.
+   */
+  slipPath    String    @default("")
+  /** Original client filename, kept only so an operator recognises the upload. */
+  slipName    String    @default("")
+  /** Whitelisted image content type of the stored file. */
+  slipType    String    @default("")
+  adminNote   String    @default("")
+  ip          String    @default("")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  paidAt      DateTime?
+  slipAt      DateTime?
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model WithdrawMethod {
+  id         String  @id @default(auto()) @map("_id") @db.ObjectId
+  name       String
+  code       String  @unique
+  logo       String  @default("")
+  currency   String  @default("")
+  minAmount  Float   @default(5)
+  maxAmount  Float   @default(100000)
+  percentFee Float   @default(0)
+  fixedFee   Float   @default(0)
+  rate       Float   @default(1)
+  /** JSON array of {key,label,type} describing the payout fields to collect. */
+  fields     String  @default("[]")
+  status     Boolean @default(true)
+  sort       Int     @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  withdrawals Withdrawal[]
+}
+
+model Withdrawal {
+  id       String         @id @default(auto()) @map("_id") @db.ObjectId
+  trx      String         @unique
+  userId   String         @db.ObjectId
+  user     User           @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  methodId String         @db.ObjectId
+  method   WithdrawMethod @relation(fields: [methodId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /** JSON object of the collected payout details (account number, wallet, …). */
+  account  String         @default("{}")
+  accountName String      @default("")
+  /** Coins requested. */
+  amount   Float
+  fee      Float          @default(0)
+  /** Coins deducted from the wallet: amount + fee. */
+  charge   Float          @default(0)
+  /** Currency units the player receives: amount / rate. */
+  net      Float          @default(0)
+  currency String         @default("USD")
+  /** pending | success | cancel */
+  status   String         @default("pending")
+  adminNote String        @default("")
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  paidAt   DateTime?
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+/* ------------------------------------------------------------------- ledger */
+
+model Transaction {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  trx       String   @unique
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /** deposit | withdrawal | bonus | referral | bet | win | adjustment | refund */
+  type      String
+  /** Signed coin amount. Credits positive, debits negative. */
+  amount    Float
+  /** Engine wallet after the movement. */
+  balance   Float    @default(0)
+  memo      String   @default("")
+  /** Related deposit/withdrawal trx. */
+  ref       String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+}
+
+model BonusClaim {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  /** Dedupe key, e.g. daily:<userId>:2026-10-04. */
+  claimKey  String   @unique
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /** welcome | daily | referral | promo */
+  kind      String
+  amount    Float
+  claimedAt DateTime @default(now())
+
+  @@index([userId, kind])
+}
+
+/* ----------------------------------------------------------------- support */
+
+model SupportTicket {
+  id         String           @id @default(auto()) @map("_id") @db.ObjectId
+  ticket     String           @unique
+  userId     String           @db.ObjectId
+  user       User             @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  subject    String
+  category   String           @default("general") // general | payment | bonus | account | game
+  priority   String           @default("normal") // low | normal | high
+  /** open | answered | closed */
+  status     String           @default("open")
+  lastReply  DateTime         @default(now())
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  messages   SupportMessage[]
+}
+
+model SupportMessage {
+  id        String        @id @default(auto()) @map("_id") @db.ObjectId
+  ticketId  String        @db.ObjectId
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /** Denormalized from the ticket so admin queues can filter by player. */
+  userId    String        @db.ObjectId
+  user      User          @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  author    String        @default("user")
+  isAdmin   Boolean       @default(false)
+  body      String
+  createdAt DateTime      @default(now())
+
+  @@index([ticketId, createdAt])
+  @@index([userId, createdAt])
+}
+
+/* ---------------------------------------------------------------------- kyc */
+
+model KycSubmission {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId     String    @unique @db.ObjectId
+  user       User      @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  /** JSON object of the submitted identity document fields. */
+  data       String    @default("{}")
+  /** pending | approved | rejected */
+  status     String    @default("pending")
+  reason     String    @default("")
+  submittedAt DateTime @default(now())
+  reviewedAt DateTime?
+}

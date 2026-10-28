@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+:root {
+  --background: #293a6b;
+  --foreground: #e2e8f0;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Self-hosted Cinzel (via next/font) for the luxury display type. */
+.font-cinzel {
+  font-family: var(--font-cinzel), Georgia, serif;
+}
+
+body {
+  background:
+    radial-gradient(1100px 620px at 16% -12%, rgba(255, 214, 138, 0.26) 0%, transparent 62%),
+    radial-gradient(900px 520px at 92% 4%, rgba(110, 178, 255, 0.24) 0%, transparent 60%),
+    radial-gradient(circle at 32% 0%, #3a4d88 0%, #293a6b 52%, #1e2b52 100%);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  font-size: 17px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* Rolling layer inside a reel cell: GSAP fills it while the reel spins, then it
+   empties and hands the cell back to the symbol React rendered. */
+.cell-roll {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* One reel cell.
+ *
+ * `overflow: hidden` is the fix for symbols appearing to roll *over* their
+ * neighbours. The roll layer is inset:0 in the cell, but GSAP translates it to
+ * y:-16 per step and y:-22 with scale 1.2 on the landing — both of which push
+ * its content outside the cell's box. Without clipping here, a rolling symbol in
+ * row 2 visibly slid up across row 1 while row 1 sat still showing its settled
+ * symbol, which reads as exactly the "some symbols are stuck, others are rolling
+ * over them" artefact.
+ *
+ * `isolation: isolate` gives the cell its own stacking context, so the roll
+ * layer's z-index:2 is resolved against the cell rather than the whole reel
+ * window. Without it the roll competes with the payline overlay (z-20) and the
+ * big-win scrim (z-30), and a roll would paint over the very payline it is
+ * drawing symbols for.
+ *
+ * The settled symbol sits at z-index:1 explicitly rather than relying on being
+ * unpositioned: an unpositioned element loses to a positioned sibling no matter
+ * how far back its z-index is meant to be, which left the resting symbol and the
+ * rolling one arguing about who was on top. */
+.play-cell {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.play-cell > .cell-sym {
+  position: relative;
+  z-index: 1;
+}
+
+/* Buffalo reel "stop": each symbol drops into place as the spin settles.
+ * A single transform keyframe, no GSAP, because the answer — and therefore the
+ * grid it is animating in — only exists for one render. */
+.spin-drop {
+  animation: nk-spin-drop 220ms ease-out;
+}
+@keyframes nk-spin-drop {
+  from {
+    transform: translateY(-14px) scale(0.92);
+    opacity: 0.4;
+  }
+  to {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+

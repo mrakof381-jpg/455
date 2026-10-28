@@ -1,0 +1,43 @@
+{
+  "name": "nexus-k",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "engine": "cd engine && ./slotopol web",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "postinstall": "prisma generate",
+    "db:push": "prisma db push",
+    "db:seed": "tsx --env-file=.env src/server/seed.ts",
+    "db:apply-defaults": "tsx --env-file=.env scripts/apply-seed-defaults.mts",
+    "db:e2e": "tsx --env-file=.env scripts/e2e-money.mts",
+    "db:e2e:http": "tsx --env-file=.env scripts/e2e-http.mts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "@types/canvas-confetti": "^1.9.0",
+    "bcryptjs": "^3.0.3",
+    "canvas-confetti": "^1.9.4",
+    "gsap": "^3.15.0",
+    "lucide-react": "^1.49.0",
+    "next": "16.3.8",
+    "prisma": "^6.19.3",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.8",
+    "tailwindcss": "^4",
+    "tsx": "^4.23.15",
+    "typescript": "^5"
+  },
+  "packageManager": "pnpm@12.8.1"
+}
